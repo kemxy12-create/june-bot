@@ -1,17 +1,30 @@
 import os
-import requests
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
 # ========================
 # Environment Variables
 # ========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")   # New key
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT")
+SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a professional product manager. Answer in a calm, structured, and actionable style.")
 
-if not TELEGRAM_TOKEN or not GROQ_API_KEY or not SYSTEM_PROMPT:
-    raise ValueError("TELEGRAM_TOKEN, GROQ_API_KEY, or SYSTEM_PROMPT not set")
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN not set")
+
+# ========================
+# Load DeepSeek-R1 / Distill LLaMA Model Locally
+# ========================
+MODEL_NAME = "DeepSeek-R1"  # Or local path if uploaded
+
+print("Loading DeepSeek-R1 model locally. This may take a minute...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model.to(device)
+print("Model loaded successfully!")
 
 # ========================
 # Conversation Memory
@@ -19,33 +32,28 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY or not SYSTEM_PROMPT:
 user_histories = {}
 
 # ========================
-# Groq API Function
+# Local Model Function
 # ========================
-def ask_groq(user_id: int, user_input: str) -> str:
+def ask_local(user_id: int, user_input: str) -> str:
     if user_id not in user_histories:
-        user_histories[user_id] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        user_histories[user_id] = [SYSTEM_PROMPT]
 
-    user_histories[user_id].append({"role": "user", "content": user_input})
+    # Add user message
+    user_histories[user_id].append(user_input)
 
-    url = "https://api.groq.ai/v1/models/deepseek-r1/predict"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "input": user_histories[user_id]  # Groq expects messages as input
-    }
+    # Prepare prompt
+    prompt = "\n".join(user_histories[user_id]) + "\nAssistant:"
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        response.raise_for_status()
-        reply = response.json()["output"][0]["content"]
-    except requests.exceptions.RequestException as e:
-        reply = f"Sorry, I can't reach Groq right now. Error: {e}"
+    with torch.no_grad():
+        output = model.generate(**inputs, max_new_tokens=200, do_sample=True, temperature=0.7)
 
-    user_histories[user_id].append({"role": "assistant", "content": reply})
+    reply = tokenizer.decode(output[0], skip_special_tokens=True)
+    # Keep only assistant reply
+    reply = reply.replace(prompt, "").strip()
+
+    # Save assistant reply
+    user_histories[user_id].append(reply)
     return reply
 
 # ========================
@@ -60,7 +68,7 @@ def handle_message(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     user_input = update.message.text
 
-    reply = ask_groq(user_id, user_input)
+    reply = ask_local(user_id, user_input)
     update.message.reply_text(reply)
 
 # ========================
@@ -73,7 +81,7 @@ def main():
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    print("June Telegram Bot is running on Groq...")
+    print("June Telegram Bot is running locally on DeepSeek-R1...")
     updater.start_polling()
     updater.idle()
 
