@@ -1,6 +1,6 @@
 import os
+import time
 import requests
-from fastapi import FastAPI, Request
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -25,24 +25,29 @@ You ask clarifying questions when needed.
 You respond clearly, structured, and grounded.
 """
 
-app = FastAPI()
+# Keep track of last update to avoid duplicates
+last_update_id = None
 
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
+def get_updates():
+    global last_update_id
+    url = f"{TELEGRAM_API}/getUpdates"
+    if last_update_id:
+        url += f"?offset={last_update_id + 1}"
+    try:
+        resp = requests.get(url, timeout=30)
+        data = resp.json()
+        return data.get("result", [])
+    except Exception:
+        return []
 
-    message = data.get("message")
-    if not message:
-        return {"ok": True}
+def send_message(chat_id, text):
+    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
-    chat_id = message["chat"]["id"]
-    user_text = message.get("text", "")
-
+def query_groq(user_text):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-
     payload = {
         "model": "llama3-8b-8192",
         "messages": [
@@ -50,17 +55,22 @@ async def telegram_webhook(request: Request):
             {"role": "user", "content": user_text}
         ]
     }
-
     try:
         resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
         result = resp.json()
-        reply = result["choices"][0]["message"]["content"]
+        return result["choices"][0]["message"]["content"]
     except Exception:
-        reply = "Sorry — I had a temporary issue. Try again."
+        return "Sorry — I had a temporary issue. Try again."
 
-    requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        json={"chat_id": chat_id, "text": reply}
-    )
-
-    return {"ok": True}
+# Main loop
+while True:
+    updates = get_updates()
+    for u in updates:
+        chat_id = u["message"]["chat"]["id"]
+        user_text = u["message"].get("text", "")
+        if not user_text:
+            continue
+        reply = query_groq(user_text)
+        send_message(chat_id, reply)
+        last_update_id = u["update_id"]
+    time.sleep(2)  # poll every 2 seconds
